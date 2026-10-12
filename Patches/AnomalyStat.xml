@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Patch>
+  <!-- Himari's trait boosts an Anomaly-only stat; without Anomaly that is a red startup error. -->
+  <Operation Class="PatchOperationFindMod">
+    <mods>
+      <li>Anomaly</li>
+    </mods>
+    <nomatch Class="PatchOperationRemove">
+      <xpath>Defs/TraitDef[defName="BAWC_TraitDef_Himari"]//statOffsets/EntityStudyRate</xpath>
+      <success>Always</success>
+    </nomatch>
+  </Operation>
+</Patch>

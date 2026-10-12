@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ModMetaData>
+  <name>BlueArchive-NewWorld Mac Fix</name>
+  <author>Kevin-66</author>
+  <packageId>local.banw.macfix</packageId>
+  <url>https://github.com/Kevin-66/BlueArchive-NewWorld-MacFix</url>
+  <supportedVersions>
+    <li>1.6</li>
+  </supportedVersions>
+  <modDependencies>
+    <li>
+      <packageId>brrainz.harmony</packageId>
+      <displayName>Harmony</displayName>
+      <steamWorkshopUrl>steam://url/CommunityFilePage/2009463077</steamWorkshopUrl>
+    </li>
+    <li>
+      <packageId>Archive.NewWorld</packageId>
+      <displayName>BlueArchive-NewWorld</displayName>
+      <steamWorkshopUrl>steam://url/CommunityFilePage/3560667190</steamWorkshopUrl>
+    </li>
+  </modDependencies>
+  <loadAfter>
+    <li>brrainz.harmony</li>
+    <li>Archive.NewWorld</li>
+  </loadAfter>
+  <description>Unofficial macOS compatibility patch for BlueArchive-NewWorld.
+
+- Replaces the mod's DirectX-only shaders (drawn magenta on Metal) with Mac-supported ones at runtime.
+- Stops "Animation not found" exceptions from Spine characters.
+- Removes an Anomaly-only stat when Anomaly is not active (red startup error).
+
+Also run tools/apply_mac_fixes.py for the fixes that need file edits. See README.md.</description>
+</ModMetaData>
