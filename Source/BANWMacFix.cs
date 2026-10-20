@@ -15,6 +15,7 @@ namespace BANWMacFix
     /// Instantiated during LoadedModManager.CreateModClasses(), before any ModAssetBundlesHandler.ReloadAll()
     /// or [StaticConstructorOnStartup] constructors run. Installing Harmony patches here ensures startup bundles
     /// (such as banw_pawns_win and damagefontsystem.ab) are intercepted from the very beginning.
+    /// Runs on RimWorld's loading thread, not Unity's main thread, so nothing here may call Unity APIs.
     /// </summary>
     public class MacFixMod : Mod
     {
@@ -48,8 +49,23 @@ namespace BANWMacFix
     /// </summary>
     public static class BundleTracker
     {
-        public static readonly bool Active = SystemInfo.graphicsDeviceType != GraphicsDeviceType.Direct3D11
-            && SystemInfo.graphicsDeviceType != GraphicsDeviceType.Direct3D12;
+        static bool? active;
+
+        /// <summary>
+        /// Read lazily: MacFixMod's constructor runs on RimWorld's loading thread and touches this class, and
+        /// querying SystemInfo off the Unity main thread aborts the game ("Graphics device is null").
+        /// </summary>
+        public static bool Active
+        {
+            get
+            {
+                if (active == null)
+                    active = SystemInfo.graphicsDeviceType != GraphicsDeviceType.Direct3D11
+                        && SystemInfo.graphicsDeviceType != GraphicsDeviceType.Direct3D12;
+                return active.Value;
+            }
+        }
+
         static readonly HashSet<int> banwBundles = new HashSet<int>();
         static string banwRoot = "";
         static bool nativeCaptured;
@@ -226,6 +242,7 @@ namespace BANWMacFix
         static readonly HashSet<int> pending = new HashSet<int>();
         static readonly Dictionary<string, Shader> workingByName = new Dictionary<string, Shader>();
         static readonly HashSet<string> logged = new HashSet<string>();
+        static readonly HashSet<int> straightTextures = new HashSet<int>();
         public static bool SweepRequested;
         public static int FollowUpSweeps;
 
@@ -355,10 +372,75 @@ namespace BANWMacFix
                 FixMaterial(sg.additiveMaterial, true);
                 FixMaterial(sg.multiplyMaterial, true);
                 FixMaterial(sg.screenMaterial, true);
+                UseStraightAlpha(sg);
             }
             foreach (var r in go.GetComponentsInChildren<Renderer>(true))
                 foreach (var m in r.sharedMaterials)
                     FixMaterial(m, false);
+        }
+
+        public static bool IsReplaced(Material m)
+        {
+            return m != null && tracked.ContainsKey(m.GetInstanceID());
+        }
+
+        /// <summary>
+        /// Spine premultiplies both its vertex colors and its atlases ("pma:true"), but the replacement UI shader
+        /// multiplies color by alpha itself, so everything translucent is darkened twice: slots fading in or out
+        /// (e.g. the patterns on Arona's top) dip dark and flash, and soft shading (blush, eye shadows) turns into
+        /// grey smudges. Switching both to straight alpha makes the replacement shader's math correct.
+        /// Additive slots are hidden by Patch_SkeletonGraphic_UpdateMesh.
+        /// </summary>
+        static void UseStraightAlpha(Spine.Unity.SkeletonGraphic sg)
+        {
+            if (!IsReplaced(sg.material) || sg.MeshGenerator == null)
+                return;
+            sg.MeshGenerator.settings.pmaVertexColors = false;
+            var data = sg.skeletonDataAsset;
+            if (data == null || data.atlasAssets == null)
+                return;
+            foreach (var atlas in data.atlasAssets)
+                if (atlas != null)
+                    foreach (var page in atlas.Materials)
+                        if (page != null)
+                            Unpremultiply(page.mainTexture as Texture2D);
+        }
+
+        /// <summary>Rewrites a premultiplied texture in place with straight alpha, once per texture.</summary>
+        static void Unpremultiply(Texture2D tex)
+        {
+            if (tex == null || !straightTextures.Add(tex.GetInstanceID()))
+                return;
+            if (tex.format != TextureFormat.RGBA32 || tex.mipmapCount != 1
+                || (SystemInfo.copyTextureSupport & CopyTextureSupport.Basic) == 0)
+            {
+                Log.Warning("[BANW Mac Fix] Cannot convert " + tex.name + " (" + tex.format + ") to straight alpha");
+                return;
+            }
+            // Atlases are not CPU-readable: read them back through a render texture.
+            var rt = RenderTexture.GetTemporary(tex.width, tex.height, 0, RenderTextureFormat.ARGB32);
+            Graphics.Blit(tex, rt);
+            var prev = RenderTexture.active;
+            RenderTexture.active = rt;
+            var copy = new Texture2D(tex.width, tex.height, TextureFormat.RGBA32, false);
+            copy.ReadPixels(new Rect(0, 0, tex.width, tex.height), 0, 0, false);
+            RenderTexture.active = prev;
+            RenderTexture.ReleaseTemporary(rt);
+
+            var px = copy.GetPixels32();
+            for (int i = 0; i < px.Length; i++)
+            {
+                int a = px[i].a;
+                if (a == 0 || a == 255)
+                    continue;
+                px[i].r = (byte)Math.Min(255, (px[i].r * 255 + a / 2) / a);
+                px[i].g = (byte)Math.Min(255, (px[i].g * 255 + a / 2) / a);
+                px[i].b = (byte)Math.Min(255, (px[i].b * 255 + a / 2) / a);
+            }
+            copy.SetPixels32(px);
+            copy.Apply(false);
+            Graphics.CopyTexture(copy, tex);
+            UnityEngine.Object.Destroy(copy);
         }
 
         /// <summary>Catches materials created or cloned asynchronously after bundle/prefab loads.</summary>
@@ -378,6 +460,9 @@ namespace BANWMacFix
             foreach (var m in Resources.FindObjectsOfTypeAll<Material>())
                 if (m != null && checkedMaterials.Add(m.GetInstanceID()))
                     FixMaterial(m, false);
+            foreach (var sg in Resources.FindObjectsOfTypeAll<Spine.Unity.SkeletonGraphic>())
+                if (sg != null)
+                    UseStraightAlpha(sg);
         }
     }
 
@@ -406,7 +491,8 @@ namespace BANWMacFix
 
     /// <summary>
     /// Runtime patches for BANWlLib.dll methods that construct Windows backslash paths for videos, portraits,
-    /// and voice lines, plus suppressing the NVIDIA-only GPU warning dialog on macOS.
+    /// and voice lines, plus suppressing the NVIDIA-only GPU warning dialog on macOS and keeping damage numbers
+    /// off RimWorld's loading thread.
     /// Applied dynamically so BANWMacFix does not require a hard assembly reference to BANWlLib.dll.
     /// </summary>
     static class DynamicPatches
@@ -421,6 +507,11 @@ namespace BANWMacFix
             var gpuCheck = AccessTools.Method("BANWlLib.Init.StartupModCheck:CheckGPUCompatibility");
             if (gpuCheck != null)
                 harmony.Patch(gpuCheck, prefix: new HarmonyMethod(typeof(DynamicPatches), nameof(SkipOnMacPrefix)));
+
+            // Every damage/heal number goes through ShowFloatText.
+            var floatText = AccessTools.Method("BANWlLib.DamageFontSystem.CriticalObjPool:ShowFloatText");
+            if (floatText != null)
+                harmony.Patch(floatText, prefix: new HarmonyMethod(typeof(DynamicPatches), nameof(MainThreadOnlyPrefix)));
         }
 
         static void PatchPathArg0(Harmony harmony, string typeName, string methodName)
@@ -452,6 +543,16 @@ namespace BANWMacFix
         public static bool SkipOnMacPrefix()
         {
             return !BundleTracker.Active;
+        }
+
+        /// <summary>
+        /// Pawns damaged during map generation (e.g. half-eaten ancients in cryptosleep caskets) are damaged on
+        /// RimWorld's loading thread, where laying out the number's UI text aborts the game on Metal. Nobody can
+        /// see those numbers anyway. Must not touch Unity (including BundleTracker.Active) before the check.
+        /// </summary>
+        public static bool MainThreadOnlyPrefix()
+        {
+            return UnityData.IsInMainThread;
         }
     }
 
@@ -525,6 +626,29 @@ namespace BANWMacFix
             if (__result != null && BundleTracker.IsBanwPath(path))
                 BundleTracker.AddBundle(__result, path);
             ShaderFixer.RequestSweep();
+        }
+    }
+
+    /// <summary>
+    /// The replacement shader cannot blend additively, and additive art is painted on black, so with straight vertex
+    /// colors additive slots draw as dark sheets (Momoka's phone screen, halo glows). Hide them; premultiplied
+    /// vertex colors hid them too, by zeroing their alpha.
+    /// </summary>
+    [HarmonyPatch(typeof(Spine.Unity.SkeletonGraphic), nameof(Spine.Unity.SkeletonGraphic.UpdateMesh))]
+    static class Patch_SkeletonGraphic_UpdateMesh
+    {
+        static void Prefix(Spine.Unity.SkeletonGraphic __instance)
+        {
+            var gen = __instance.MeshGenerator;
+            if (gen == null || gen.settings.pmaVertexColors || !ShaderFixer.IsReplaced(__instance.material))
+                return;
+            var skeleton = __instance.Skeleton;
+            if (skeleton == null)
+                return;
+            var slots = skeleton.Slots.Items;
+            for (int i = 0, n = skeleton.Slots.Count; i < n; i++)
+                if (slots[i].Data.BlendMode == Spine.BlendMode.Additive)
+                    slots[i].A = 0;
         }
     }
 

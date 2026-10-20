@@ -28,6 +28,8 @@
 - Loads student and Sensei textures from banw_pawns_win at runtime on macOS.
 - Normalizes Windows backslash file paths for gacha videos, portraits, and voice lines at runtime.
 - Replaces DirectX-only shaders (drawn magenta on Metal) with Mac-supported ones at runtime.
+- Draws Spine characters with straight alpha, so fading parts no longer flash and soft shading is no longer grey.
+- Fixes a crash while generating a new map, caused by damage numbers on RimWorld's loading thread.
 - Stops "Animation not found" exceptions from Spine characters.
 - Suppresses the non-NVIDIA GPU startup warning popup on macOS.
 - Removes an Anomaly-only stat when Anomaly is not active (red startup error).</description>

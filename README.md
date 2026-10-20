@@ -14,11 +14,23 @@ All fixes run automatically at runtime via Harmony and XML patches—no external
 | Gacha banner videos and some avatars missing | Paths built with Windows `\` separators in `BANWlLib.dll` | Harmony prefixes normalize `\` to `/` in `PlayLocalVideo` and `LoadSpriteFromFile` |
 | Arona/Plana and student voice lines silent | `\` in `DraggableAudio` / `aronaAudioClipPath` in Defs | Harmony prefixes normalize `\` to `/` in `LoadAudioClipBlocking` and `PlayClipDirectly` |
 | Magenta backgrounds, damage numbers, particles, and gacha effects | Bundled shaders contain DirectX code only | Early `Mod` initialization & `AssetBundle` hooks swap broken shaders (including `SkeletonGraphic` blend materials) to Metal-compatible game shaders |
+| Spine characters' clothes flash (Arona); grey smudges on faces (blush, eye shadows) | Spine premultiplies its vertex colors and atlases, and the replacement UI shader multiplies by alpha again | Switches those skeletons to straight-alpha vertex colors and converts their atlases to straight alpha once when loaded |
+| Game crashes while generating a new map | Pawns damaged during map generation (e.g. ancients in cryptosleep caskets) make BANW lay out damage-number text on RimWorld's loading thread, which aborts on Metal | Harmony prefix skips `CriticalObjPool.ShowFloatText` off the main thread |
 | `Animation not found: Eye_Close` exceptions | Some skeletons lack animations the UI requests | Harmony prefix on `Spine.AnimationState` returns a no-op `TrackEntry` |
 | Non-NVIDIA GPU modal warning on every launch | `StartupModCheck` warns whenever GPU vendor ID is not NVIDIA | Harmony prefix skips `CheckGPUCompatibility` on Metal/macOS |
 | Debug log opens at every launch | Himari's trait uses Anomaly's `EntityStudyRate` stat; `ChezhouLib` dependency lacks Workshop URL | Conditional XML patch removes `EntityStudyRate` when Anomaly is inactive; auto-heals `About.xml` |
 
 Blend modes are approximated with the game's own shaders, so some glow/lighting effects look flatter than on Windows.
+None of those shaders can blend additively, so additive glow layers on Spine characters (halo glows, Momoka's phone
+screen) are hidden.
+
+## Known issues in BlueArchive-NewWorld itself
+
+These happen on every platform and are not fixed by this mod:
+
+- Four of Arona's tap reactions use `Sounds\aronaAudio\onClick8.ogg`–`onClick11.ogg`, which the mod does not ship.
+  Picking one logs a `NullReferenceException` and shows no speech bubble.
+- The Total Assault (总力战) page has a plain grey background and a blank menu button.
 
 ## Install
 
