@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Text.RegularExpressions;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -8,17 +11,33 @@ using Verse;
 
 namespace BANWMacFix
 {
+    /// <summary>
+    /// Instantiated during LoadedModManager.CreateModClasses(), before any ModAssetBundlesHandler.ReloadAll()
+    /// or [StaticConstructorOnStartup] constructors run. Installing Harmony patches here ensures startup bundles
+    /// (such as banw_pawns_win and damagefontsystem.ab) are intercepted from the very beginning.
+    /// </summary>
+    public class MacFixMod : Mod
+    {
+        public MacFixMod(ModContentPack content) : base(content)
+        {
+            BundleTracker.ConfigureModRoot();
+            var harmony = new Harmony("local.banw.macfix");
+            harmony.PatchAll(typeof(MacFixMod).Assembly);
+            DynamicPatches.Apply(harmony);
+        }
+    }
+
     [StaticConstructorOnStartup]
     public static class MacFixStartup
     {
         static MacFixStartup()
         {
-            BundleTracker.Init();
-            new Harmony("local.banw.macfix").PatchAll(typeof(MacFixStartup).Assembly);
+            BundleTracker.CaptureNativeShaders();
             BundleTracker.RegisterStartupBundles();
             var go = new GameObject("BANWMacFix_ShaderSweeper");
             UnityEngine.Object.DontDestroyOnLoad(go);
             go.AddComponent<ShaderSweeper>();
+            ShaderFixer.RequestSweep();
         }
     }
 
@@ -33,6 +52,7 @@ namespace BANWMacFix
             && SystemInfo.graphicsDeviceType != GraphicsDeviceType.Direct3D12;
         static readonly HashSet<int> banwBundles = new HashSet<int>();
         static string banwRoot = "";
+        static bool nativeCaptured;
 
         // Unity's "Always Included" shaders: bundles reference these instead of packing copies.
         static readonly HashSet<string> nativeNames = new HashSet<string>
@@ -42,18 +62,78 @@ namespace BANWMacFix
 
         static ModContentPack BanwPack
         {
-            get { return LoadedModManager.RunningModsListForReading.FirstOrDefault(p => p.PackageId == "archive.newworld"); }
+            get
+            {
+                return LoadedModManager.RunningModsListForReading.FirstOrDefault(
+                    p => string.Equals(p.PackageId, "archive.newworld", StringComparison.OrdinalIgnoreCase));
+            }
         }
 
-        /// <summary>Runs before any of the mod's UI is loaded: every shader in memory now belongs to the game.</summary>
-        public static void Init()
+        public static void ConfigureModRoot()
         {
             var pack = BanwPack;
-            if (pack != null)
-                banwRoot = Normalize(pack.RootDir);
+            if (pack == null)
+                return;
+            banwRoot = Normalize(pack.RootDir);
+            MaintainWorkshopFiles(pack.RootDir);
+        }
+
+        /// <summary>
+        /// Must run on the Unity main thread before any mod AssetBundle is loaded so only genuine game shaders
+        /// are recorded as native.
+        /// </summary>
+        public static void CaptureNativeShaders()
+        {
+            if (nativeCaptured)
+                return;
+            nativeCaptured = true;
+            if (banwRoot.Length == 0)
+            {
+                var pack = BanwPack;
+                if (pack != null)
+                    banwRoot = Normalize(pack.RootDir);
+            }
             foreach (var s in Resources.FindObjectsOfTypeAll<Shader>())
                 if (s != null && !string.IsNullOrEmpty(s.name))
                     nativeNames.Add(s.name);
+        }
+
+        static void MaintainWorkshopFiles(string rootDir)
+        {
+            try
+            {
+                // Clean up legacy duplicate 33.5 MB bundle created by older script versions;
+                // banw_pawns_win is now loaded directly at runtime.
+                string winBundle = Path.Combine(rootDir, "1.6", "AssetBundles", "banw_pawns_win");
+                string macBundle = Path.Combine(rootDir, "1.6", "AssetBundles", "banw_pawns_mac");
+                if (File.Exists(winBundle) && File.Exists(macBundle))
+                {
+                    var winInfo = new FileInfo(winBundle);
+                    var macInfo = new FileInfo(macBundle);
+                    if (winInfo.Length == macInfo.Length)
+                        File.Delete(macBundle);
+                }
+
+                // Keep About/About.xml's ChezhouLib dependency valid across Steam updates so ModLister doesn't warn.
+                string aboutPath = Path.Combine(rootDir, "About", "About.xml");
+                if (File.Exists(aboutPath))
+                {
+                    string text = File.ReadAllText(aboutPath);
+                    if (text.Contains("Chezhou.ChezhouLib.lib") && !text.Contains("3595247479"))
+                    {
+                        string updated = Regex.Replace(
+                            text,
+                            @"(<packageId>\s*Chezhou\.ChezhouLib\.lib\s*</packageId>\s*<displayName>[^<]*</displayName>)(\s*</li>)",
+                            "$1\n\t\t\t<steamWorkshopUrl>steam://url/CommunityFilePage/3595247479</steamWorkshopUrl>$2");
+                        if (updated != text)
+                            File.WriteAllText(aboutPath, updated);
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // Non-critical housekeeping; ignore read-only filesystem errors.
+            }
         }
 
         static string Normalize(string p)
@@ -115,6 +195,12 @@ namespace BANWMacFix
             foreach (var g in go.GetComponentsInChildren<UnityEngine.UI.Graphic>(true))
                 if (g.material != null)
                     NoteShader(g.material.shader);
+            foreach (var sg in go.GetComponentsInChildren<Spine.Unity.SkeletonGraphic>(true))
+            {
+                if (sg.additiveMaterial != null) NoteShader(sg.additiveMaterial.shader);
+                if (sg.multiplyMaterial != null) NoteShader(sg.multiplyMaterial.shader);
+                if (sg.screenMaterial != null) NoteShader(sg.screenMaterial.shader);
+            }
             foreach (var r in go.GetComponentsInChildren<Renderer>(true))
                 foreach (var m in r.sharedMaterials)
                     if (m != null)
@@ -141,11 +227,23 @@ namespace BANWMacFix
         static readonly Dictionary<string, Shader> workingByName = new Dictionary<string, Shader>();
         static readonly HashSet<string> logged = new HashSet<string>();
         public static bool SweepRequested;
+        public static int FollowUpSweeps;
+
+        public static void RequestSweep()
+        {
+            SweepRequested = true;
+            FollowUpSweeps = 2;
+        }
 
         public static void Invalidate()
         {
             checkedMaterials.Clear();
-            SweepRequested = true;
+            RequestSweep();
+        }
+
+        public static bool HasPendingWork
+        {
+            get { return SweepRequested || FollowUpSweeps > 0 || pending.Count > 0; }
         }
 
         static bool IsBroken(Shader s)
@@ -252,14 +350,22 @@ namespace BANWMacFix
                 return;
             foreach (var g in go.GetComponentsInChildren<UnityEngine.UI.Graphic>(true))
                 FixMaterial(g.material, true);
+            foreach (var sg in go.GetComponentsInChildren<Spine.Unity.SkeletonGraphic>(true))
+            {
+                FixMaterial(sg.additiveMaterial, true);
+                FixMaterial(sg.multiplyMaterial, true);
+                FixMaterial(sg.screenMaterial, true);
+            }
             foreach (var r in go.GetComponentsInChildren<Renderer>(true))
                 foreach (var m in r.sharedMaterials)
                     FixMaterial(m, false);
         }
 
-        /// <summary>Catches materials created or loaded by paths the patches do not see.</summary>
+        /// <summary>Catches materials created or cloned asynchronously after bundle/prefab loads.</summary>
         public static void Sweep()
         {
+            if (!SweepRequested && FollowUpSweeps > 0)
+                FollowUpSweeps--;
             SweepRequested = false;
             foreach (var id in pending.ToList())
             {
@@ -277,14 +383,16 @@ namespace BANWMacFix
 
     public class ShaderSweeper : MonoBehaviour
     {
-        const float Interval = 3f;
+        const float FollowUpInterval = 0.75f;
         float nextSweep;
 
         void Update()
         {
+            if (!ShaderFixer.HasPendingWork)
+                return;
             if (!ShaderFixer.SweepRequested && Time.realtimeSinceStartup < nextSweep)
                 return;
-            nextSweep = Time.realtimeSinceStartup + Interval;
+            nextSweep = Time.realtimeSinceStartup + FollowUpInterval;
             try
             {
                 ShaderFixer.Sweep();
@@ -296,6 +404,77 @@ namespace BANWMacFix
         }
     }
 
+    /// <summary>
+    /// Runtime patches for BANWlLib.dll methods that construct Windows backslash paths for videos, portraits,
+    /// and voice lines, plus suppressing the NVIDIA-only GPU warning dialog on macOS.
+    /// Applied dynamically so BANWMacFix does not require a hard assembly reference to BANWlLib.dll.
+    /// </summary>
+    static class DynamicPatches
+    {
+        public static void Apply(Harmony harmony)
+        {
+            PatchPathArg0(harmony, "newpro.imgcvT2d", "LoadSpriteFromFile");
+            PatchPathArg0(harmony, "BANWlLib.mainUI.lordHudong", "LoadAudioClipBlocking");
+            PatchPathArg0(harmony, "MyCoolMusicMod.MyCoolMusicMod.LoopBGMManager", "PlayClipDirectly");
+            PatchPathArg1(harmony, "BANWlLib.mainUI.Gaka.Gakalord", "PlayLocalVideo");
+
+            var gpuCheck = AccessTools.Method("BANWlLib.Init.StartupModCheck:CheckGPUCompatibility");
+            if (gpuCheck != null)
+                harmony.Patch(gpuCheck, prefix: new HarmonyMethod(typeof(DynamicPatches), nameof(SkipOnMacPrefix)));
+        }
+
+        static void PatchPathArg0(Harmony harmony, string typeName, string methodName)
+        {
+            var target = AccessTools.Method(typeName + ":" + methodName);
+            if (target != null)
+                harmony.Patch(target, prefix: new HarmonyMethod(typeof(DynamicPatches), nameof(NormalizeArg0Prefix)));
+        }
+
+        static void PatchPathArg1(Harmony harmony, string typeName, string methodName)
+        {
+            var target = AccessTools.Method(typeName + ":" + methodName);
+            if (target != null)
+                harmony.Patch(target, prefix: new HarmonyMethod(typeof(DynamicPatches), nameof(NormalizeArg1Prefix)));
+        }
+
+        public static void NormalizeArg0Prefix(ref string __0)
+        {
+            if (__0 != null && __0.IndexOf('\\') >= 0)
+                __0 = __0.Replace('\\', '/');
+        }
+
+        public static void NormalizeArg1Prefix(ref string __1)
+        {
+            if (__1 != null && __1.IndexOf('\\') >= 0)
+                __1 = __1.Replace('\\', '/');
+        }
+
+        public static bool SkipOnMacPrefix()
+        {
+            return !BundleTracker.Active;
+        }
+    }
+
+    /// <summary>
+    /// BlueArchive-NewWorld ships student/Sensei textures in banw_pawns_win with no _mac bundle.
+    /// Redirecting BundleSuffixForCurrentOs for archive.newworld lets RimWorld (and ChezhouLib) load
+    /// banw_pawns_win directly without duplicating 33.5 MB on disk.
+    /// </summary>
+    [HarmonyPatch(typeof(ModAssetBundlesHandler), "get_BundleSuffixForCurrentOs")]
+    static class Patch_ModAssetBundlesHandler_BundleSuffix
+    {
+        static readonly FieldInfo ModField = AccessTools.Field(typeof(ModAssetBundlesHandler), "mod");
+
+        static void Postfix(ModAssetBundlesHandler __instance, ref string __result)
+        {
+            if (__result != "_mac" || ModField == null)
+                return;
+            var mod = ModField.GetValue(__instance) as ModContentPack;
+            if (mod != null && string.Equals(mod.PackageId, "archive.newworld", StringComparison.OrdinalIgnoreCase))
+                __result = "_win";
+        }
+    }
+
     [HarmonyPatch(typeof(AssetBundle), nameof(AssetBundle.LoadAsset), new[] { typeof(string), typeof(Type) })]
     static class Patch_AssetBundle_LoadAsset
     {
@@ -304,19 +483,48 @@ namespace BANWMacFix
             if (__result == null)
                 return;
             if (BundleTracker.IsBanwBundle(__instance))
+            {
                 BundleTracker.NoteAsset(__result);
+                if (__result is GameObject)
+                    ShaderFixer.RequestSweep();
+            }
             ShaderFixer.FixObject(__result);
+        }
+    }
+
+    [HarmonyPatch(typeof(AssetBundle), nameof(AssetBundle.LoadAllAssets), new[] { typeof(Type) })]
+    static class Patch_AssetBundle_LoadAllAssets
+    {
+        static void Postfix(AssetBundle __instance, UnityEngine.Object[] __result)
+        {
+            if (__result == null)
+                return;
+            bool isBanw = BundleTracker.IsBanwBundle(__instance);
+            for (int i = 0; i < __result.Length; i++)
+            {
+                var obj = __result[i];
+                if (obj == null)
+                    continue;
+                if (isBanw)
+                    BundleTracker.NoteAsset(obj);
+                ShaderFixer.FixObject(obj);
+            }
         }
     }
 
     [HarmonyPatch(typeof(AssetBundle), nameof(AssetBundle.LoadFromFile), new[] { typeof(string) })]
     static class Patch_AssetBundle_LoadFromFile
     {
+        static void Prefix()
+        {
+            BundleTracker.CaptureNativeShaders();
+        }
+
         static void Postfix(string path, AssetBundle __result)
         {
             if (__result != null && BundleTracker.IsBanwPath(path))
                 BundleTracker.AddBundle(__result, path);
-            ShaderFixer.SweepRequested = true;
+            ShaderFixer.RequestSweep();
         }
     }
 

@@ -7,7 +7,10 @@ RIMWORLD="${RIMWORLD:-$HOME/Library/Application Support/Steam/steamapps/common/R
 WORKSHOP="${WORKSHOP:-$HOME/Library/Application Support/Steam/steamapps/workshop/content/294100}"
 MANAGED="$RIMWORLD/RimWorldMac.app/Contents/Resources/Data/Managed"
 BANW="$WORKSHOP/3560667190/1.6/Assemblies"
-HARMONY="$WORKSHOP/2009463077/Current/Assemblies/0Harmony.dll"
+HARMONY="$WORKSHOP/2009463077/1.6/Assemblies/0Harmony.dll"
+if [ ! -f "$HARMONY" ]; then
+  HARMONY="$WORKSHOP/2009463077/Current/Assemblies/0Harmony.dll"
+fi
 
 refs=()
 for r in mscorlib System System.Core netstandard Assembly-CSharp UnityEngine UnityEngine.CoreModule \

@@ -25,9 +25,10 @@
   </loadAfter>
   <description>Unofficial macOS compatibility patch for BlueArchive-NewWorld.
 
-- Replaces the mod's DirectX-only shaders (drawn magenta on Metal) with Mac-supported ones at runtime.
+- Loads student and Sensei textures from banw_pawns_win at runtime on macOS.
+- Normalizes Windows backslash file paths for gacha videos, portraits, and voice lines at runtime.
+- Replaces DirectX-only shaders (drawn magenta on Metal) with Mac-supported ones at runtime.
 - Stops "Animation not found" exceptions from Spine characters.
-- Removes an Anomaly-only stat when Anomaly is not active (red startup error).
-
-Also run tools/apply_mac_fixes.py for the fixes that need file edits. See README.md.</description>
+- Suppresses the non-NVIDIA GPU startup warning popup on macOS.
+- Removes an Anomaly-only stat when Anomaly is not active (red startup error).</description>
 </ModMetaData>
